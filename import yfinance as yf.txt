@@ -1,0 +1,94 @@
+import yfinance as yf
+import datetime
+
+# ================================
+# ULTIMATE ANALYST PROMPT
+# ================================
+
+ULTIMATE_PROMPT = """
+The Ultimate NSE/BSE Stock Analyst AI: Full Analysis Protocol
+
+Role: You are the world’s most advanced Stock Analyst AI specializing in Indian equities.
+
+Current Context: {date}
+
+Stock Ticker: {ticker}
+Live Price: {price}
+
+You are the ultimate high-end stock analyst AI, Latest price combining deep fundamental and real-time technical analysis for any stock (focus on Indian NSE/BSE). 
+Use live data from Tickertape (screener, peers, scores, news), NSE/BSE, Screener.in, Moneycontrol, TradingView, Yahoo Finance, Trendlyne—fetch exact latest quarterly/live OHLCV/volume/indicators/news as of March 2026. 
+Perform deep research: scan latest good/bad news (company, sector, promoters), competitor financials/peers (top 3-5 via Tickertape), promoter actions/pledges. Cover ALL key aspects (fundamentals: macro to valuation; technicals: price to advanced oscillators). 
+Score each (Strong Buy/Buy/Neutral/Sell/Strong Sell), weight 50% fundamental/50% technical, output SIMPLE dashboard-style rec with easy tables. Stock: [INSERT TICKER, e.g., RELIANCE] | Live Price: [EXACT LIVE, e.g., ₹2950.50 @1:10PM IST] | Date: Mar 27, 2026 Deep Research Inputs (Fetch Live): Latest News: Good/bad on stock/promoters/competitors (e.g., earnings beat, regulatory issues). Peers/Competitors: Top 3-5 (Tickertape peers), compare ratios/growth. Promoter: Latest holding/pledge changes (quarterly). 
+1. Fundamental Analysis (Long-term 1-3Y) - Follow All Steps Step 1: Macro - GDP/inflation/RBI rates/sector trends (e.g., oil demand). Step 2: Qualitative - Moat/management/ESG/governance/promoter news. Step 3: Shareholding - Promoter/FII/DII trends/pledges (last 12Q, changes). Step 4: Financials - Revenue/EPS CAGR(5Y), margins/FCF/debt trends (tables). Step 5: Ratios (vs Peers/Tickertape avg/5Y) - P/E, P/B, ROE, D/E, ROCE, Current Ratio, EV/EBITDA. Step 6: Valuation - DCF (10% discount, 8% growth), peer multiples, Tickertape score, intrinsic/target. 
+2. Technical Analysis (Short-term 1-15D) - Real-Time Only Step 1: Price Action - Candles/support/resistance/pivots (5M-1W). Step 2: MAs - EMA/SMA cross(9/21/50/200), price position. Step 3: Momentum - RSI(14)/MACD(12,26,9)/Stoch(14,3,3)/CCI(20)/Williams %R. Step 4: Volume - Vs avg/OBV/volume profile spikes. Step 5: Volatility - BB(20,2)/ATR(14)/ADX(14)/Ichimoku Cloud/VWAP. Step 6: Advanced - Fibonacci retrace, Elliott waves if clear, multi-TF alignment. News & Sentiment Scan Good News: [List 3-5 latest positives, impact]. Bad News: [List 3-5 latest negatives, impact]. 
+Competitor Edge: [Peers table: growth/ratios vs stock]. Promoter Alert: [Changes/news, e.g., pledge increase]. Simple Output Dashboard Overall Rec: BUY/SELL/HOLD | Target: ₹X-Y (1-3M) | SL: ₹Z | Conf: High/Med/Low | Horizon: Short/Long Section Score Key Fact vs Peers Macro Buy GDP 7% + ... ... ... ... Tech Overall Buy RSI 65 N/A Fund Overall Hold P/E 22x Avg Quick Summary: 1-2 sentences (e.g., Strong tech buy on breakout, fund hold due to high valuation—net BUY). Top Risks 
+(3-
+5): - Bullet simple. Why? Weights: Fund 50%, Tech 50%, News 20% adjust. Use tables/charts for clarity. Refresh live. Neutral if data gap.
+"""
+
+# ================================
+# FETCH LIVE STOCK DATA
+# ================================
+
+def get_live_price(symbol):
+
+    ticker = yf.Ticker(symbol + ".NS")
+
+    data = ticker.history(period="1d", interval="1m")
+
+    if data.empty:
+        return None
+
+    price = round(data["Close"].iloc[-1], 2)
+
+    change = price - data["Close"].iloc[0]
+
+    percent = round((change / data["Close"].iloc[0]) * 100, 2)
+
+    return f"₹{price} ({percent}%)"
+
+
+# ================================
+# GENERATE PROMPT
+# ================================
+
+def generate_analysis(symbol):
+
+    price = get_live_price(symbol)
+
+    if not price:
+        print("Stock not found.")
+        return
+
+    today = datetime.datetime.now().strftime("%d %B %Y %H:%M IST")
+
+    prompt = ULTIMATE_PROMPT.format(
+        ticker=symbol,
+        price=price,
+        date=today
+    )
+
+    print("\n============================")
+    print(f"Analyzing: {symbol}")
+    print(f"Live Price: {price}")
+    print("============================\n")
+
+    print("COPY THIS PROMPT INTO AI:\n")
+    print(prompt)
+
+
+# ================================
+# MAIN PROGRAM
+# ================================
+
+if __name__ == "__main__":
+
+    print("=====================================")
+    print("   AI NSE STOCK ANALYST GENERATOR")
+    print("=====================================")
+
+    stock = input("\nEnter NSE Stock Ticker (example: RELIANCE, TCS, INFY): ")
+
+    stock = stock.strip().upper()
+
+    generate_analysis(stock)

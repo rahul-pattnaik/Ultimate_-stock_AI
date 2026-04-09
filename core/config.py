@@ -1,0 +1,4 @@
+STOCKS = ["RELIANCE.NS","TCS.NS","INFY.NS"]
+
+PERIOD = "6mo"
+INTERVAL = "1d"
