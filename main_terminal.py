@@ -1,3 +1,5 @@
+# create a stock scoring system combining
+# RSI, MACD, volume breakout, and fundamentals
 import sys
 import os
 import yfinance as yf
