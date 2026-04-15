@@ -7,6 +7,7 @@
 
 import time
 import logging
+import json
 from typing import Optional
 
 import requests
@@ -85,7 +86,19 @@ def _fetch_nse_index(url: str) -> Optional[list]:
         session = _get_nse_session()
         response = session.get(url, timeout=20)
         response.raise_for_status()
-        data = response.json()
+        body = response.text.strip()
+        content_type = response.headers.get("Content-Type", "").lower()
+        if not body:
+            logger.info("NSE API returned an empty response; using fallback universe.")
+            return None
+        if "json" not in content_type and not body.startswith("{") and not body.startswith("["):
+            logger.info("NSE API returned non-JSON content; using fallback universe.")
+            return None
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            logger.info("NSE API returned invalid JSON; using fallback universe.")
+            return None
         symbols = [x["symbol"] + ".NS" for x in data.get("data", [])]
         return symbols if symbols else None
     except Exception as e:

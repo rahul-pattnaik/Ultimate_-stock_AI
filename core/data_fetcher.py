@@ -1,82 +1,78 @@
-# core/data_fetcher.py
-# ─────────────────────────────────────────────────────────────────────────────
-# Data Fetcher — yfinance wrapper
-# FIXES:
-#   ✅ MultiIndex column flattening (yfinance >= 0.2.18)
-#   ✅ Auto-retry with exponential backoff
-#   ✅ Disk caching (avoids re-downloading same data)
-#   ✅ Data validation (min rows, positive prices, null check)
-#   ✅ Single & batch download support
-# ─────────────────────────────────────────────────────────────────────────────
-
-import os
-import time
-import pickle
 import hashlib
+import io
 import logging
+import os
+import pickle
+import time
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from .config import (PERIOD, INTERVAL, MIN_BARS, CACHE_DIR,
-                     CACHE_TTL_HOURS, FETCH_RETRIES, FETCH_TIMEOUT)
+from .config import (
+    CACHE_DIR,
+    CACHE_TTL_HOURS,
+    FETCH_RETRIES,
+    FETCH_TIMEOUT,
+    INTERVAL,
+    MIN_BARS,
+    PERIOD,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ── Cache ─────────────────────────────────────────────────────────────────────
-
 def _cache_key(symbol: str, period: str, interval: str) -> str:
     return hashlib.md5(f"{symbol}_{period}_{interval}".encode()).hexdigest()
+
 
 def _cache_path(key: str) -> str:
     os.makedirs(CACHE_DIR, exist_ok=True)
     return os.path.join(CACHE_DIR, f"{key}.pkl")
+
 
 def _cache_valid(path: str) -> bool:
     if not os.path.exists(path):
         return False
     return (time.time() - os.path.getmtime(path)) / 3600 < CACHE_TTL_HOURS
 
+
 def _save_cache(path: str, df: pd.DataFrame) -> None:
     try:
-        with open(path, "wb") as f:
-            pickle.dump(df, f)
-    except Exception as e:
-        logger.warning(f"Cache write failed: {e}")
+        with open(path, "wb") as handle:
+            pickle.dump(df, handle)
+    except Exception as exc:
+        logger.warning(f"Cache write failed: {exc}")
+
 
 def _load_cache(path: str) -> Optional[pd.DataFrame]:
     try:
-        with open(path, "rb") as f:
-            return pickle.load(f)
+        with open(path, "rb") as handle:
+            return pickle.load(handle)
     except Exception:
         return None
 
 
-# ── Column Flattening (KEY FIX) ───────────────────────────────────────────────
-
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    yfinance ≥ 0.2.18 returns MultiIndex columns even for single tickers:
-        ('Close', 'RELIANCE.NS') → 'Close'
-    This fix is applied EVERYWHERE before any computation.
-    """
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+def _quiet_download(*args, **kwargs) -> pd.DataFrame:
+    sink = io.StringIO()
+    with redirect_stdout(sink), redirect_stderr(sink):
+        return yf.download(*args, **kwargs)
 
-def _validate(df: pd.DataFrame, symbol: str) -> tuple:
+
+def _validate(df: pd.DataFrame, symbol: str, min_bars: int = MIN_BARS) -> tuple[bool, str]:
     if df is None or df.empty:
         return False, "Empty DataFrame"
-    if len(df) < MIN_BARS:
-        return False, f"Only {len(df)} rows (need {MIN_BARS})"
+    if len(df) < min_bars:
+        return False, f"Only {len(df)} rows (need {min_bars})"
     required = ["Open", "High", "Low", "Close", "Volume"]
-    missing  = [c for c in required if c not in df.columns]
+    missing = [column for column in required if column not in df.columns]
     if missing:
         return False, f"Missing columns: {missing}"
     if df["Close"].isnull().mean() > 0.1:
@@ -86,45 +82,41 @@ def _validate(df: pd.DataFrame, symbol: str) -> tuple:
     return True, "OK"
 
 
-# ── Core Fetch ────────────────────────────────────────────────────────────────
+def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    df = _flatten_columns(df)
+    available = [column for column in ["Open", "High", "Low", "Close", "Volume"] if column in df.columns]
+    cleaned = df[available].copy()
+    cleaned = cleaned.dropna(how="all")
+    cleaned.index = pd.to_datetime(cleaned.index)
+    cleaned.sort_index(inplace=True)
+    cleaned = cleaned.ffill().dropna()
+    return cleaned
 
-def get_stock_data(symbol: str,
-                   period:    str  = PERIOD,
-                   interval:  str  = INTERVAL,
-                   use_cache: bool = True,
-                   verbose:   bool = False) -> Optional[pd.DataFrame]:
-    """
-    Download OHLCV data for a single symbol.
 
-    Args:
-        symbol    : ticker e.g. "RELIANCE.NS" or "AAPL"
-        period    : yfinance period string
-        interval  : yfinance interval string
-        use_cache : use disk cache
-        verbose   : print status
-
-    Returns:
-        Clean DataFrame with [Open, High, Low, Close, Volume]
-        or None on failure.
-    """
+def get_stock_data(
+    symbol: str,
+    period: str = PERIOD,
+    interval: str = INTERVAL,
+    use_cache: bool = True,
+    verbose: bool = False,
+    min_bars: int = MIN_BARS,
+) -> Optional[pd.DataFrame]:
     symbol = symbol.upper().strip()
 
-    # Cache check
     if use_cache:
-        key  = _cache_key(symbol, period, interval)
+        key = _cache_key(symbol, period, interval)
         path = _cache_path(key)
         if _cache_valid(path):
-            df = _load_cache(path)
-            if df is not None:
+            cached = _load_cache(path)
+            if cached is not None:
                 if verbose:
-                    print(f"[CACHE] {symbol} ({len(df)} rows)")
-                return df
+                    print(f"[CACHE] {symbol} ({len(cached)} rows)")
+                return cached
 
-    # Download with retry
     df = None
     for attempt in range(1, FETCH_RETRIES + 1):
         try:
-            raw = yf.download(
+            raw = _quiet_download(
                 symbol,
                 period=period,
                 interval=interval,
@@ -135,77 +127,60 @@ def get_stock_data(symbol: str,
             if raw is not None and not raw.empty:
                 df = raw
                 break
-        except Exception as e:
+        except Exception as exc:
             wait = 2 ** attempt
-            logger.warning(f"[{symbol}] Attempt {attempt} failed: {e}. Retry in {wait}s")
+            logger.warning(f"[{symbol}] Attempt {attempt} failed: {exc}. Retry in {wait}s")
             if attempt < FETCH_RETRIES:
                 time.sleep(wait)
 
     if df is None or df.empty:
         logger.error(f"[{symbol}] All {FETCH_RETRIES} download attempts failed")
-        print(f"❌ No data for {symbol}. Possible reasons:")
-        print(f"   • Wrong symbol (Indian stocks need .NS suffix, e.g. RELIANCE.NS)")
-        print(f"   • Delisted or unavailable")
+        print(f"[ERROR] No data for {symbol}. Possible reasons:")
+        print("   - Wrong symbol (Indian stocks need .NS suffix, e.g. RELIANCE.NS)")
+        print("   - Delisted or unavailable")
         return None
 
-    # ── THE KEY FIX: flatten MultiIndex columns ───────────────────────
-    df = _flatten_columns(df)
+    df = _prepare_ohlcv(df)
 
-    # Keep only OHLCV
-    available = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-    df = df[available].copy()
-    df = df.dropna(how="all")
-    df.index = pd.to_datetime(df.index)
-    df.sort_index(inplace=True)
-    df = df.ffill().dropna()
-
-    # Validate
-    ok, reason = _validate(df, symbol)
+    ok, reason = _validate(df, symbol, min_bars=min_bars)
     if not ok:
         logger.error(f"[{symbol}] Validation failed: {reason}")
-        print(f"❌ Data validation failed for {symbol}: {reason}")
+        print(f"[ERROR] Data validation failed for {symbol}: {reason}")
         return None
 
     if verbose:
-        print(f"[FETCH] {symbol} → {len(df)} rows | "
-              f"{df.index[0].date()} to {df.index[-1].date()}")
+        print(f"[FETCH] {symbol} -> {len(df)} rows | {df.index[0].date()} to {df.index[-1].date()}")
 
-    # Cache save
     if use_cache:
-        key  = _cache_key(symbol, period, interval)
-        _save_cache(_cache_path(key), df)
+        _save_cache(_cache_path(_cache_key(symbol, period, interval)), df)
 
     return df
 
 
-# ── Batch Download ────────────────────────────────────────────────────────────
-
-def get_multiple_stocks(symbols: list,
-                        period:    str  = PERIOD,
-                        interval:  str  = INTERVAL,
-                        use_cache: bool = True,
-                        verbose:   bool = True) -> dict:
-    """
-    Download data for multiple symbols efficiently.
-    Returns dict {symbol: DataFrame} — only successful downloads.
-    """
-    symbols  = [s.upper().strip() for s in symbols]
-    result   = {}
+def get_multiple_stocks(
+    symbols: list,
+    period: str = PERIOD,
+    interval: str = INTERVAL,
+    use_cache: bool = True,
+    verbose: bool = True,
+    min_bars: int = MIN_BARS,
+) -> dict:
+    symbols = [symbol.upper().strip() for symbol in symbols]
+    result = {}
     to_fetch = []
 
-    # Check cache first
     if use_cache:
-        for sym in symbols:
-            key  = _cache_key(sym, period, interval)
+        for symbol in symbols:
+            key = _cache_key(symbol, period, interval)
             path = _cache_path(key)
             if _cache_valid(path):
-                df = _load_cache(path)
-                if df is not None:
-                    result[sym] = df
+                cached = _load_cache(path)
+                if cached is not None:
+                    result[symbol] = cached
                     if verbose:
-                        print(f"[CACHE] {sym}")
+                        print(f"[CACHE] {symbol}")
                     continue
-            to_fetch.append(sym)
+            to_fetch.append(symbol)
     else:
         to_fetch = list(symbols)
 
@@ -216,7 +191,7 @@ def get_multiple_stocks(symbols: list,
         print(f"[FETCH] Downloading {len(to_fetch)} symbols...")
 
     try:
-        raw = yf.download(
+        raw = _quiet_download(
             to_fetch,
             period=period,
             interval=interval,
@@ -225,96 +200,79 @@ def get_multiple_stocks(symbols: list,
             timeout=FETCH_TIMEOUT,
             auto_adjust=True,
         )
-    except Exception as e:
-        logger.error(f"Batch download failed: {e}. Falling back to individual.")
+    except Exception as exc:
+        logger.error(f"Batch download failed: {exc}. Falling back to individual.")
         raw = None
 
     if raw is not None and not raw.empty:
-        for sym in to_fetch:
+        for symbol in to_fetch:
             try:
                 if len(to_fetch) == 1:
                     df = raw.copy()
-                elif sym in raw.columns.get_level_values(0):
-                    df = raw[sym].copy()
+                elif symbol in raw.columns.get_level_values(0):
+                    df = raw[symbol].copy()
                 else:
                     df = None
 
-                if df is None or (hasattr(df, 'empty') and df.empty):
+                if df is None or df.empty:
                     continue
 
-                df = _flatten_columns(df)
-                available = [c for c in ["Open", "High", "Low", "Close", "Volume"]
-                             if c in df.columns]
-                df = df[available].dropna()
-                df.index = pd.to_datetime(df.index)
-                df.sort_index(inplace=True)
-                df = df.ffill().dropna()
-
-                ok, reason = _validate(df, sym)
+                df = _prepare_ohlcv(df)
+                ok, reason = _validate(df, symbol, min_bars=min_bars)
                 if ok:
-                    result[sym] = df
+                    result[symbol] = df
                     if use_cache:
-                        key  = _cache_key(sym, period, interval)
-                        _save_cache(_cache_path(key), df)
+                        _save_cache(_cache_path(_cache_key(symbol, period, interval)), df)
                     if verbose:
-                        print(f"  ✅ {sym} ({len(df)} rows)")
-                else:
-                    if verbose:
-                        print(f"  ❌ {sym}: {reason}")
-
-            except Exception as e:
-                logger.warning(f"  ❌ {sym}: {e}")
+                        print(f"  [OK] {symbol} ({len(df)} rows)")
+                elif verbose:
+                    print(f"  [SKIP] {symbol}: {reason}")
+            except Exception as exc:
+                logger.warning(f"  [SKIP] {symbol}: {exc}")
     else:
-        for sym in to_fetch:
-            df = get_stock_data(sym, period, interval, use_cache, verbose)
+        for symbol in to_fetch:
+            df = get_stock_data(symbol, period, interval, use_cache, verbose)
             if df is not None:
-                result[sym] = df
+                result[symbol] = df
 
     return result
 
 
-# ── Latest Price Snapshot ─────────────────────────────────────────────────────
-
 def get_latest_price(symbol: str) -> dict:
-    """Fetch latest price info (fast 5d window)."""
-    df = get_stock_data(symbol, period="5d", interval="1d",
-                        use_cache=False, verbose=False)
+    df = get_stock_data(symbol, period="5d", interval="1d", use_cache=False, verbose=False, min_bars=2)
     if df is None or df.empty:
         return {"error": f"Could not fetch {symbol}"}
 
     latest = df.iloc[-1]
-    prev   = df.iloc[-2] if len(df) >= 2 else latest
-
-    close  = float(latest["Close"])
-    prev_c = float(prev["Close"])
-    change = close - prev_c
-    pct    = change / prev_c * 100
+    previous = df.iloc[-2] if len(df) >= 2 else latest
+    close = float(latest["Close"])
+    previous_close = float(previous["Close"])
+    change = close - previous_close
+    change_pct = change / previous_close * 100
 
     return {
-        "symbol":     symbol,
-        "price":      round(close, 2),
-        "change":     round(change, 2),
-        "change_pct": round(pct, 2),
-        "volume":     int(latest["Volume"]),
-        "high":       round(float(latest["High"]), 2),
-        "low":        round(float(latest["Low"]), 2),
-        "date":       str(df.index[-1].date()),
-        "trend":      "UP 📈" if change > 0 else "DOWN 📉",
+        "symbol": symbol,
+        "price": round(close, 2),
+        "change": round(change, 2),
+        "change_pct": round(change_pct, 2),
+        "volume": int(latest["Volume"]),
+        "high": round(float(latest["High"]), 2),
+        "low": round(float(latest["Low"]), 2),
+        "date": str(df.index[-1].date()),
+        "trend": "UP" if change > 0 else "DOWN",
     }
 
 
-# ── Cache Management ──────────────────────────────────────────────────────────
-
-def clear_cache(symbol: str = None, period: str = PERIOD,
-                interval: str = INTERVAL) -> None:
+def clear_cache(symbol: str = None, period: str = PERIOD, interval: str = INTERVAL) -> None:
     if symbol:
-        key  = _cache_key(symbol.upper(), period, interval)
+        key = _cache_key(symbol.upper(), period, interval)
         path = _cache_path(key)
         if os.path.exists(path):
             os.remove(path)
             print(f"Cleared cache for {symbol}")
-    else:
-        if os.path.exists(CACHE_DIR):
-            for f in os.listdir(CACHE_DIR):
-                os.remove(os.path.join(CACHE_DIR, f))
-            print(f"Cleared all cache ({CACHE_DIR})")
+        return
+
+    if os.path.exists(CACHE_DIR):
+        for filename in os.listdir(CACHE_DIR):
+            os.remove(os.path.join(CACHE_DIR, filename))
+        print(f"Cleared all cache ({CACHE_DIR})")

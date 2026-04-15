@@ -5,6 +5,11 @@
 # Output    : next N-day price prediction + directional signal
 # ─────────────────────────────────────────────────────────────────────────────
 
+import os
+import warnings
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
@@ -56,6 +61,32 @@ def _make_sequences(data: np.ndarray, seq_len: int):
     return np.array(X), np.array(y)
 
 
+def _quiet_tensorflow_logs() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Do not pass an `input_shape`/`input_dim` argument to a layer.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*triggered tf.function retracing.*",
+        category=UserWarning,
+    )
+    try:
+        import tensorflow as tf
+
+        tf.get_logger().setLevel("ERROR")
+    except Exception:
+        pass
+
+    try:
+        from absl import logging as absl_logging
+
+        absl_logging.set_verbosity(absl_logging.ERROR)
+    except Exception:
+        pass
+
+
 # ── Model Builder ─────────────────────────────────────────────────────────────
 
 def build_lstm(input_shape: tuple):
@@ -70,6 +101,8 @@ def build_lstm(input_shape: tuple):
         Dense(1)
     """
     try:
+        _quiet_tensorflow_logs()
+        from tensorflow.keras import Input
         from tensorflow.keras.models import Sequential
         from tensorflow.keras.layers import (LSTM, Dense, Dropout,
                                              BatchNormalization)
@@ -77,7 +110,8 @@ def build_lstm(input_shape: tuple):
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
         model = Sequential([
-            LSTM(128, return_sequences=True, input_shape=input_shape),
+            Input(shape=input_shape),
+            LSTM(128, return_sequences=True),
             Dropout(0.2),
             LSTM(64, return_sequences=True),
             Dropout(0.2),
@@ -119,6 +153,7 @@ def train_lstm(df: pd.DataFrame,
     Returns dict with model, scaler, history, and evaluation metrics.
     """
     try:
+        _quiet_tensorflow_logs()
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
     except ImportError:
         raise ImportError("TensorFlow not installed. Run: pip install tensorflow")

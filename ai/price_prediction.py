@@ -57,7 +57,8 @@ def _confidence(close: np.ndarray,
     spread = np.std([lr_pred[-1], poly_pred[-1], wma_pred[-1]])
     spread_pct = spread / close[-1] * 100
 
-    vol = np.std(np.diff(close[-20:]) / close[-21:-1]) * 100 if len(close) > 21 else 3.0
+    # Match numerator/denominator lengths for recent return volatility.
+    vol = np.std(np.diff(close[-20:]) / close[-20:-1]) * 100 if len(close) > 21 else 3.0
 
     confidence = 90 - spread_pct * 5 - vol * 3
     return round(float(np.clip(confidence, 10, 95)), 1)
