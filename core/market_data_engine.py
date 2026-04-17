@@ -11,7 +11,13 @@ import pandas as pd
 import yfinance as yf
 
 from .config import FETCH_RETRIES, FETCH_TIMEOUT, INTERVAL, MIN_BARS, PERIOD
-from .data_fetcher import get_latest_price, get_multiple_stocks, get_stock_data
+from .data_fetcher import (
+    SourceAttempt,
+    get_latest_price,
+    get_multiple_stocks,
+    get_stock_data,
+    validate_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +36,6 @@ def _quiet_call(fn, *args, **kwargs):
     sink = io.StringIO()
     with redirect_stdout(sink), redirect_stderr(sink):
         return fn(*args, **kwargs)
-
-
-def _normalize_symbol(symbol: str) -> list[str]:
-    base = symbol.strip().upper()
-    if not base:
-        return []
-    if "." in base or base.startswith("^"):
-        return [base]
-    return [base, f"{base}.NS", f"{base}.BO"]
 
 
 def _prepare_actions(actions: Any) -> pd.DataFrame:
@@ -66,8 +63,11 @@ class MarketDataEngine:
         min_bars: int = MIN_BARS,
         use_cache: bool = True,
     ) -> tuple[str, Optional[pd.DataFrame], str]:
-        candidates = _normalize_symbol(symbol)
-        errors: list[str] = []
+        validation = validate_symbol(symbol)
+        candidates = validation.candidates
+        attempts: list[SourceAttempt] = []
+        if not validation.is_valid:
+            return validation.normalized, None, "validation_failed"
 
         for candidate in candidates:
             data = get_stock_data(
@@ -80,7 +80,7 @@ class MarketDataEngine:
             )
             if data is not None and not data.empty:
                 return candidate, data, "core.data_fetcher"
-            errors.append(f"{candidate}: primary download unavailable")
+            attempts.append(SourceAttempt(candidate, "core.data_fetcher", 1, False, "primary fetch unavailable"))
 
         for candidate in candidates:
             for attempt in range(1, self.retries + 1):
@@ -99,16 +99,17 @@ class MarketDataEngine:
                         prepared = prepared.dropna().sort_index()
                         if len(prepared) >= min_bars:
                             return candidate, prepared, "yfinance.Ticker.history"
+                        attempts.append(SourceAttempt(candidate, "yfinance.Ticker.history", attempt, False, "insufficient rows"))
                 except Exception as exc:
-                    errors.append(f"{candidate}: fallback attempt {attempt} failed ({exc})")
+                    attempts.append(SourceAttempt(candidate, "yfinance.Ticker.history", attempt, False, str(exc)))
                     if attempt < self.retries:
                         time.sleep(2 ** attempt)
 
-        logger.warning("Historical OHLCV fetch failed for %s: %s", symbol, "; ".join(errors[-4:]))
-        return symbol.strip().upper(), None, "unavailable"
+        logger.warning("Historical OHLCV fetch failed for %s: %s", symbol, "; ".join(f"{item.symbol}:{item.source}:{item.message}" for item in attempts[-4:]))
+        return validation.normalized, None, "unavailable"
 
     def fetch_live_price(self, symbol: str) -> dict[str, Any]:
-        candidates = _normalize_symbol(symbol)
+        candidates = validate_symbol(symbol).candidates
         for candidate in candidates:
             quote = get_latest_price(candidate)
             if "error" not in quote:
@@ -141,7 +142,7 @@ class MarketDataEngine:
         return {"error": f"Could not fetch live price for {symbol}"}
 
     def fetch_corporate_actions(self, symbol: str) -> tuple[pd.DataFrame, str]:
-        for candidate in _normalize_symbol(symbol):
+        for candidate in validate_symbol(symbol).candidates:
             try:
                 ticker = yf.Ticker(candidate)
                 actions = _prepare_actions(_quiet_call(lambda: ticker.actions))

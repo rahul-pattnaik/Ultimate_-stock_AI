@@ -15,6 +15,7 @@ from core.backtester import Backtester
 from core.config import NIFTY50_STOCKS, STOCKS, US_STOCKS
 from core.data_fetcher import get_latest_price, get_multiple_stocks, get_stock_data
 from core.nse_universe import (
+    canonical_symbol,
     get_custom_watchlist,
     get_nifty50,
     get_nifty500,
@@ -754,7 +755,7 @@ def _quiet_yfinance_download(ticker: str) -> pd.DataFrame:
 
 
 def resolve_symbol(raw: str) -> str:
-    symbol = raw.strip().upper()
+    symbol = canonical_symbol(raw)
     if not symbol:
         return symbol
     if "." in symbol or symbol.startswith("^"):

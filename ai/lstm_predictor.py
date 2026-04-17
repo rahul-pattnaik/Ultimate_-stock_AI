@@ -6,9 +6,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
+import io
 import warnings
+from contextlib import redirect_stderr, redirect_stdout
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+os.environ.setdefault("AUTOGRAPH_VERBOSITY", "0")
 
 import numpy as np
 import pandas as pd
@@ -76,6 +80,10 @@ def _quiet_tensorflow_logs() -> None:
         import tensorflow as tf
 
         tf.get_logger().setLevel("ERROR")
+        try:
+            tf.autograph.set_verbosity(0)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -85,6 +93,12 @@ def _quiet_tensorflow_logs() -> None:
         absl_logging.set_verbosity(absl_logging.ERROR)
     except Exception:
         pass
+
+
+def _quiet_import(importer):
+    sink = io.StringIO()
+    with redirect_stdout(sink), redirect_stderr(sink):
+        return importer()
 
 
 # ── Model Builder ─────────────────────────────────────────────────────────────
@@ -102,12 +116,18 @@ def build_lstm(input_shape: tuple):
     """
     try:
         _quiet_tensorflow_logs()
-        from tensorflow.keras import Input
-        from tensorflow.keras.models import Sequential
-        from tensorflow.keras.layers import (LSTM, Dense, Dropout,
-                                             BatchNormalization)
-        from tensorflow.keras.optimizers import Adam
-        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        keras_items = _quiet_import(
+            lambda: (
+                __import__("tensorflow.keras", fromlist=["Input"]).Input,
+                __import__("tensorflow.keras.models", fromlist=["Sequential"]).Sequential,
+                __import__("tensorflow.keras.layers", fromlist=["LSTM", "Dense", "Dropout", "BatchNormalization"]).LSTM,
+                __import__("tensorflow.keras.layers", fromlist=["LSTM", "Dense", "Dropout", "BatchNormalization"]).Dense,
+                __import__("tensorflow.keras.layers", fromlist=["LSTM", "Dense", "Dropout", "BatchNormalization"]).Dropout,
+                __import__("tensorflow.keras.layers", fromlist=["LSTM", "Dense", "Dropout", "BatchNormalization"]).BatchNormalization,
+                __import__("tensorflow.keras.optimizers", fromlist=["Adam"]).Adam,
+            )
+        )
+        Input, Sequential, LSTM, Dense, Dropout, BatchNormalization, Adam = keras_items
 
         model = Sequential([
             Input(shape=input_shape),
@@ -154,7 +174,13 @@ def train_lstm(df: pd.DataFrame,
     """
     try:
         _quiet_tensorflow_logs()
-        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        callback_items = _quiet_import(
+            lambda: (
+                __import__("tensorflow.keras.callbacks", fromlist=["EarlyStopping"]).EarlyStopping,
+                __import__("tensorflow.keras.callbacks", fromlist=["ReduceLROnPlateau"]).ReduceLROnPlateau,
+            )
+        )
+        EarlyStopping, ReduceLROnPlateau = callback_items
     except ImportError:
         raise ImportError("TensorFlow not installed. Run: pip install tensorflow")
 

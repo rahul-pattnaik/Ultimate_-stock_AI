@@ -27,6 +27,18 @@ def test_resolve_symbol_returns_original_when_no_probe_matches(monkeypatch) -> N
     assert main_terminal.resolve_symbol("unknown") == "UNKNOWN"
 
 
+def test_resolve_symbol_maps_legacy_indian_alias_without_probe() -> None:
+    assert main_terminal.resolve_symbol("zomato") == "ETERNAL"
+
+
+def test_validate_symbol_allows_valid_ampersand_ticker() -> None:
+    from core.data_fetcher import validate_symbol
+
+    result = validate_symbol("M&M.NS")
+    assert result.is_valid is True
+    assert result.normalized == "M&M.NS"
+
+
 def test_lowercase_ohlcv_converts_columns(bullish_df: pd.DataFrame) -> None:
     lowered = main_terminal._lowercase_ohlcv(bullish_df)
     assert list(lowered.columns) == ["open", "high", "low", "close", "volume"]

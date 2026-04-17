@@ -18,6 +18,20 @@ from .config import (NSE_HEADERS, NSE_SESSION_URL,
 
 logger = logging.getLogger(__name__)
 
+LEGACY_SYMBOL_ALIASES = {
+    "ZOMATO": "ETERNAL",
+    "ZOMATO.NS": "ETERNAL.NS",
+    "ZOMATO.BO": "ETERNAL.BO",
+    "MOTHERSUMI": "MOTHERSON",
+    "MOTHERSUMI.NS": "MOTHERSON.NS",
+    "MOTHERSUMI.BO": "MOTHERSON.BO",
+}
+
+
+def canonical_symbol(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    return LEGACY_SYMBOL_ALIASES.get(normalized, normalized)
+
 
 # ── Hardcoded Fallbacks ───────────────────────────────────────────────────────
 # NSE blocks automated requests aggressively. These are reliable fallbacks.
@@ -35,8 +49,54 @@ _NIFTY50_FALLBACK = [
     "RELIANCE.NS", "SBILIFE.NS", "SHRIRAMFIN.NS", "SBIN.NS",
     "SUNPHARMA.NS", "TCS.NS", "TATACONSUM.NS", "TATAMOTORS.NS",
     "TATASTEEL.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS",
-    "WIPRO.NS", "ZOMATO.NS",
+    "WIPRO.NS", "ETERNAL.NS",
 ]
+
+_NIFTY500_APPROX_FALLBACK = [
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
+    "BHARTIARTL.NS", "SBIN.NS", "LT.NS", "ITC.NS", "HINDUNILVR.NS",
+    "KOTAKBANK.NS", "AXISBANK.NS", "BAJFINANCE.NS", "ASIANPAINT.NS", "MARUTI.NS",
+    "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "NESTLEIND.NS", "WIPRO.NS",
+    "HCLTECH.NS", "TECHM.NS", "POWERGRID.NS", "NTPC.NS", "ONGC.NS",
+    "COALINDIA.NS", "TATAMOTORS.NS", "M&M.NS", "TATASTEEL.NS", "ETERNAL.NS",
+    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "BAJAJ-AUTO.NS", "BAJAJFINSV.NS",
+    "BPCL.NS", "BRITANNIA.NS", "CIPLA.NS", "DIVISLAB.NS", "DRREDDY.NS",
+    "EICHERMOT.NS", "GRASIM.NS", "HDFCLIFE.NS", "HEROMOTOCO.NS", "HINDALCO.NS",
+    "INDUSINDBK.NS", "JSWSTEEL.NS", "SBILIFE.NS", "SHRIRAMFIN.NS", "TATACONSUM.NS",
+    "ABB.NS", "ACC.NS", "AMBUJACEM.NS", "ASHOKLEY.NS", "ASTRAL.NS",
+    "AUROPHARMA.NS", "BALKRISIND.NS", "BANKBARODA.NS", "BDL.NS", "BEL.NS",
+    "BERGEPAINT.NS", "BHARATFORG.NS", "BHEL.NS", "BIOCON.NS", "BOSCHLTD.NS",
+    "CANBK.NS", "CGPOWER.NS", "CHAMBLFERT.NS", "COLPAL.NS", "CONCOR.NS",
+    "CROMPTON.NS", "CUMMINSIND.NS", "DABUR.NS", "DALBHARAT.NS", "DEEPAKNTR.NS",
+    "DIXON.NS", "DMART.NS", "ESCORTS.NS", "EXIDEIND.NS", "FACT.NS",
+    "FEDERALBNK.NS", "GAIL.NS", "GLAND.NS", "GMRINFRA.NS", "GODREJCP.NS",
+    "GODREJPROP.NS", "HAL.NS", "HAVELS.NS", "HINDPETRO.NS", "HINDZINC.NS",
+    "ICICIGI.NS", "ICICIPRULI.NS", "IDFCFIRSTB.NS", "IEX.NS", "INDIGO.NS",
+    "INDUSTOWER.NS", "IRCTC.NS", "JINDALSTEL.NS", "JIOFIN.NS", "JSWENERGY.NS",
+    "KEI.NS", "LICI.NS", "LODHA.NS", "LUPIN.NS", "MANKIND.NS",
+    "MARICO.NS", "MAXHEALTH.NS", "MCX.NS", "MOTHERSON.NS", "MPHASIS.NS",
+    "MRF.NS", "NAUKRI.NS", "NMDC.NS", "OBEROIRLTY.NS", "OIL.NS",
+    "PAGEIND.NS", "PATANJALI.NS", "PEL.NS", "PETRONET.NS", "PFC.NS",
+    "PIDILITIND.NS", "PIIND.NS", "PNB.NS", "POLYCAB.NS", "RAMCOCEM.NS",
+    "RECLTD.NS", "SAIL.NS", "SAMMAANCAP.NS", "SHREECEM.NS", "SRF.NS",
+    "SUPREMEIND.NS", "TATACHEM.NS", "TATACOMM.NS", "TORNTPHARM.NS", "TORNTPOWER.NS",
+    "TRENT.NS", "TVSMOTORS.NS", "UBL.NS", "UNIONBANK.NS", "UPL.NS",
+    "VBL.NS", "VEDL.NS", "VOLTAS.NS", "YESBANK.NS", "ZYDUSLIFE.NS",
+    "AUBANK.NS", "ALKEM.NS", "APOLLOTYRE.NS", "BANDHANBNK.NS", "COFORGE.NS",
+    "FORTIS.NS", "IPCALAB.NS", "LTIM.NS", "MOTHERSON.NS", "OFSS.NS",
+    "PERSISTENT.NS", "SUNTV.NS", "TIINDIA.NS", "TORNTPHARM.NS", "TVSMOTORS.NS",
+]
+
+
+def _unique_symbols(symbols: list[str]) -> list[str]:
+    unique = []
+    seen = set()
+    for symbol in symbols:
+        canonical = canonical_symbol(symbol)
+        if canonical not in seen:
+            unique.append(canonical)
+            seen.add(canonical)
+    return unique
 
 _NIFTY_IT_FALLBACK = [
     "TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "TECHM.NS",
@@ -117,11 +177,12 @@ def get_nifty50(use_fallback: bool = True) -> list:
     """
     symbols = _fetch_nse_index(NSE_NIFTY50_URL)
     if symbols:
-        print(f"✅ Fetched {len(symbols)} Nifty 50 stocks from NSE")
-        return symbols
+        print(f"[OK] Fetched {len(symbols)} Nifty 50 stocks from NSE")
+        return _unique_symbols(symbols)
     if use_fallback:
-        print(f"⚠️  NSE API unavailable — using fallback Nifty 50 list ({len(_NIFTY50_FALLBACK)} stocks)")
-        return _NIFTY50_FALLBACK
+        fallback = _unique_symbols(_NIFTY50_FALLBACK)
+        print(f"[WARN] NSE API unavailable - using fallback Nifty 50 list ({len(fallback)} stocks)")
+        return fallback
     return []
 
 
@@ -135,11 +196,12 @@ def get_nifty500(use_fallback: bool = True) -> list:
     """
     symbols = _fetch_nse_index(NSE_NIFTY500_URL)
     if symbols:
-        print(f"✅ Fetched {len(symbols)} Nifty 500 stocks from NSE")
-        return symbols
+        print(f"[OK] Fetched {len(symbols)} Nifty 500 stocks from NSE")
+        return _unique_symbols(symbols)
     if use_fallback:
-        print(f"⚠️  NSE API unavailable — using Nifty 50 fallback")
-        return _NIFTY50_FALLBACK
+        fallback = _unique_symbols(_NIFTY500_APPROX_FALLBACK)
+        print(f"[WARN] NSE API unavailable - using approximate Nifty 500 fallback ({len(fallback)} stocks)")
+        return fallback
     return []
 
 
@@ -167,23 +229,27 @@ def get_sector(sector: str) -> list:
         "auto":     ("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20AUTO",
                      _NIFTY_AUTO_FALLBACK),
         "nifty50":  (NSE_NIFTY50_URL,  _NIFTY50_FALLBACK),
-        "nifty500": (NSE_NIFTY500_URL, _NIFTY50_FALLBACK),
+        "nifty500": (NSE_NIFTY500_URL, _NIFTY500_APPROX_FALLBACK),
     }
 
     if sector not in sector_map:
         available = ", ".join(sector_map.keys())
-        print(f"❌ Unknown sector '{sector}'. Available: {available}")
+        print(f"[ERROR] Unknown sector '{sector}'. Available: {available}")
         return []
 
     url, fallback = sector_map[sector]
     symbols = _fetch_nse_index(url)
 
     if symbols:
-        print(f"✅ {sector.upper()}: {len(symbols)} stocks")
-        return symbols
+        print(f"[OK] {sector.upper()}: {len(symbols)} stocks")
+        return _unique_symbols(symbols)
 
-    print(f"⚠️  NSE API failed for {sector} — using fallback ({len(fallback)} stocks)")
-    return fallback
+    fallback_symbols = _unique_symbols(fallback)
+    if sector == "nifty500":
+        print(f"[WARN] NSE API failed for {sector} - using approximate fallback ({len(fallback_symbols)} stocks)")
+    else:
+        print(f"[WARN] NSE API failed for {sector} - using fallback ({len(fallback_symbols)} stocks)")
+    return fallback_symbols
 
 
 def get_custom_watchlist(symbols: list) -> list:
@@ -198,7 +264,7 @@ def get_custom_watchlist(symbols: list) -> list:
     """
     cleaned = []
     for s in symbols:
-        s = s.upper().strip()
+        s = canonical_symbol(s)
         # If no exchange suffix and looks like NSE symbol, add .NS
         if "." not in s and not s.startswith("^"):
             s += ".NS"
@@ -221,7 +287,7 @@ def search_symbol(query: str) -> list:
         resp    = session.get(url, timeout=15)
         data    = resp.json()
         matches = data.get("symbols", [])
-        return [{"symbol": m.get("symbol", "") + ".NS",
+        return [{"symbol": canonical_symbol(m.get("symbol", "") + ".NS"),
                  "name":   m.get("symbol_info", "")}
                 for m in matches[:10]]
     except Exception as e:

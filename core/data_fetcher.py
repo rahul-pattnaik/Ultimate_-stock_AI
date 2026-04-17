@@ -3,8 +3,10 @@ import io
 import logging
 import os
 import pickle
+import re
 import time
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
@@ -19,8 +21,49 @@ from .config import (
     MIN_BARS,
     PERIOD,
 )
+from .nse_universe import canonical_symbol
 
 logger = logging.getLogger(__name__)
+
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9.\-^_&]{1,20}$")
+
+
+@dataclass
+class SymbolValidationResult:
+    is_valid: bool
+    normalized: str
+    candidates: list[str]
+    reason: str = ""
+
+
+@dataclass
+class SourceAttempt:
+    symbol: str
+    source: str
+    attempt: int
+    success: bool
+    message: str
+
+
+def validate_symbol(symbol: str) -> SymbolValidationResult:
+    normalized = canonical_symbol(symbol)
+    if not normalized:
+        return SymbolValidationResult(False, "", [], "Blank symbol")
+    if not SYMBOL_PATTERN.match(normalized):
+        return SymbolValidationResult(False, normalized, [], "Unsupported symbol format")
+    if normalized.startswith(".") or normalized.endswith("."):
+        return SymbolValidationResult(False, normalized, [], "Malformed ticker")
+    if "." in normalized or normalized.startswith("^"):
+        return SymbolValidationResult(True, normalized, [normalized], "OK")
+    return SymbolValidationResult(True, normalized, [normalized, f"{normalized}.NS", f"{normalized}.BO"], "OK")
+
+
+def _describe_no_data(symbol: str, reason: str = "") -> None:
+    print(f"[ERROR] No data for {symbol}. Possible reasons:")
+    print("   - Wrong symbol (Indian stocks often need .NS or .BO)")
+    print("   - Delisted, unavailable, or temporarily unsupported")
+    if reason:
+        print(f"   - Validation / fetch detail: {reason}")
 
 
 def _cache_key(symbol: str, period: str, interval: str) -> str:
@@ -66,6 +109,13 @@ def _quiet_download(*args, **kwargs) -> pd.DataFrame:
         return yf.download(*args, **kwargs)
 
 
+def _quiet_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    sink = io.StringIO()
+    with redirect_stdout(sink), redirect_stderr(sink):
+        ticker = yf.Ticker(symbol)
+        return ticker.history(period=period, interval=interval, auto_adjust=True, actions=False)
+
+
 def _validate(df: pd.DataFrame, symbol: str, min_bars: int = MIN_BARS) -> tuple[bool, str]:
     if df is None or df.empty:
         return False, "Empty DataFrame"
@@ -93,6 +143,46 @@ def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return cleaned
 
 
+def _fetch_download_source(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    return _quiet_download(
+        symbol,
+        period=period,
+        interval=interval,
+        progress=False,
+        timeout=FETCH_TIMEOUT,
+        auto_adjust=True,
+    )
+
+
+def _fetch_ticker_history_source(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    return _quiet_history(symbol, period=period, interval=interval)
+
+
+def _run_source_with_retries(
+    source_name: str,
+    symbol: str,
+    period: str,
+    interval: str,
+    retries: int,
+    fetch_fn,
+) -> tuple[Optional[pd.DataFrame], list[SourceAttempt]]:
+    attempts: list[SourceAttempt] = []
+    for attempt in range(1, retries + 1):
+        try:
+            raw = fetch_fn(symbol, period, interval)
+            if raw is not None and not raw.empty:
+                attempts.append(SourceAttempt(symbol, source_name, attempt, True, f"{len(raw)} rows"))
+                return raw, attempts
+            attempts.append(SourceAttempt(symbol, source_name, attempt, False, "Empty response"))
+        except Exception as exc:
+            attempts.append(SourceAttempt(symbol, source_name, attempt, False, str(exc)))
+            wait = 2 ** attempt
+            logger.warning("[%s] %s attempt %s failed: %s. Retry in %ss", symbol, source_name, attempt, exc, wait)
+            if attempt < retries:
+                time.sleep(wait)
+    return None, attempts
+
+
 def get_stock_data(
     symbol: str,
     period: str = PERIOD,
@@ -101,60 +191,62 @@ def get_stock_data(
     verbose: bool = False,
     min_bars: int = MIN_BARS,
 ) -> Optional[pd.DataFrame]:
-    symbol = symbol.upper().strip()
+    validation = validate_symbol(symbol)
+    symbol = validation.normalized
+    if not validation.is_valid:
+        logger.error("[%s] Validation failed: %s", symbol or symbol, validation.reason)
+        print(f"[ERROR] Symbol validation failed for {symbol or '<blank>'}: {validation.reason}")
+        return None
 
     if use_cache:
-        key = _cache_key(symbol, period, interval)
-        path = _cache_path(key)
-        if _cache_valid(path):
-            cached = _load_cache(path)
-            if cached is not None:
-                if verbose:
-                    print(f"[CACHE] {symbol} ({len(cached)} rows)")
-                return cached
+        for candidate in validation.candidates:
+            key = _cache_key(candidate, period, interval)
+            path = _cache_path(key)
+            if _cache_valid(path):
+                cached = _load_cache(path)
+                if cached is not None:
+                    if verbose:
+                        print(f"[CACHE] {candidate} ({len(cached)} rows)")
+                    return cached
 
-    df = None
-    for attempt in range(1, FETCH_RETRIES + 1):
-        try:
-            raw = _quiet_download(
-                symbol,
+    source_chain = [
+        ("yfinance.download", _fetch_download_source),
+        ("yfinance.Ticker.history", _fetch_ticker_history_source),
+    ]
+    history: list[SourceAttempt] = []
+
+    for candidate in validation.candidates:
+        for source_name, fetch_fn in source_chain:
+            raw, attempts = _run_source_with_retries(
+                source_name=source_name,
+                symbol=candidate,
                 period=period,
                 interval=interval,
-                progress=False,
-                timeout=FETCH_TIMEOUT,
-                auto_adjust=True,
+                retries=FETCH_RETRIES,
+                fetch_fn=fetch_fn,
             )
-            if raw is not None and not raw.empty:
-                df = raw
-                break
-        except Exception as exc:
-            wait = 2 ** attempt
-            logger.warning(f"[{symbol}] Attempt {attempt} failed: {exc}. Retry in {wait}s")
-            if attempt < FETCH_RETRIES:
-                time.sleep(wait)
+            history.extend(attempts)
+            if raw is None or raw.empty:
+                continue
 
-    if df is None or df.empty:
-        logger.error(f"[{symbol}] All {FETCH_RETRIES} download attempts failed")
-        print(f"[ERROR] No data for {symbol}. Possible reasons:")
-        print("   - Wrong symbol (Indian stocks need .NS suffix, e.g. RELIANCE.NS)")
-        print("   - Delisted or unavailable")
-        return None
+            df = _prepare_ohlcv(raw)
+            ok, reason = _validate(df, candidate, min_bars=min_bars)
+            if not ok:
+                logger.warning("[%s] %s validation failed: %s", candidate, source_name, reason)
+                history.append(SourceAttempt(candidate, source_name, len(attempts), False, f"Validation failed: {reason}"))
+                continue
 
-    df = _prepare_ohlcv(df)
+            if verbose:
+                print(f"[FETCH] {candidate} via {source_name} -> {len(df)} rows | {df.index[0].date()} to {df.index[-1].date()}")
 
-    ok, reason = _validate(df, symbol, min_bars=min_bars)
-    if not ok:
-        logger.error(f"[{symbol}] Validation failed: {reason}")
-        print(f"[ERROR] Data validation failed for {symbol}: {reason}")
-        return None
+            if use_cache:
+                _save_cache(_cache_path(_cache_key(candidate, period, interval)), df)
+            return df
 
-    if verbose:
-        print(f"[FETCH] {symbol} -> {len(df)} rows | {df.index[0].date()} to {df.index[-1].date()}")
-
-    if use_cache:
-        _save_cache(_cache_path(_cache_key(symbol, period, interval)), df)
-
-    return df
+    logger.error("[%s] All fallback sources failed", symbol)
+    last_reason = history[-1].message if history else validation.reason
+    _describe_no_data(symbol, last_reason)
+    return None
 
 
 def get_multiple_stocks(
@@ -165,7 +257,8 @@ def get_multiple_stocks(
     verbose: bool = True,
     min_bars: int = MIN_BARS,
 ) -> dict:
-    symbols = [symbol.upper().strip() for symbol in symbols]
+    validated = [validate_symbol(symbol) for symbol in symbols]
+    symbols = [item.normalized for item in validated if item.is_valid]
     result = {}
     to_fetch = []
 
@@ -234,6 +327,15 @@ def get_multiple_stocks(
             df = get_stock_data(symbol, period, interval, use_cache, verbose)
             if df is not None:
                 result[symbol] = df
+
+    unresolved = [item.normalized for item in validated if item.is_valid and item.normalized not in result and "." not in item.normalized and not item.normalized.startswith("^")]
+    for symbol in unresolved:
+        if symbol in result:
+            continue
+        df = get_stock_data(symbol, period=period, interval=interval, use_cache=use_cache, verbose=verbose, min_bars=min_bars)
+        if df is not None:
+            matching = next((candidate for candidate in validate_symbol(symbol).candidates if _cache_valid(_cache_path(_cache_key(candidate, period, interval)))), symbol)
+            result[matching] = df
 
     return result
 
